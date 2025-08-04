@@ -1,0 +1,665 @@
+---
+title: "Sensitivity Analysis"
+author: "jbaafi"
+date: "2025-04-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Sensitivity Analysis
+
+```{r}
+# Load packages
+pacman::p_load(deSolve, lhs, sensitivity, dplyr, ggplot2)
+
+# Define the ODEs
+culex_model <- function(time, state, parameters) {
+  with(as.list(c(state, parameters)), {
+    dE <- (b * phi_A * (1 - (A + A_d) / K) * A) - ((rho_E + mu_E) * E)
+    dL <- (rho_E * E) - ((rho_L + mu_L + sigma_L) * L)
+    dP <- (rho_L * L) - ((rho_P + mu_P) * P)
+    dA <- (rho_P * P + gamma * A_d) - ((mu_A + delta) * A)
+    dA_d <- (delta * A) - ((gamma + mu_A_d) * A_d)
+    
+    list(c(dE, dL, dP, dA, dA_d))
+  })
+}
+
+# Parameter ranges
+param_ranges <- list(
+  b = c(250, 350),
+  K = c(9e5, 1.1e8),
+  sigma_L = c(0.001, 0.01),
+  mu_A_d = c(0.001, 0.05),
+  phi_A = c(0.001, 0.55),
+  rho_E = c(0.001, 0.40),
+  mu_E = c(0.095, 1.025),
+  rho_L = c(0.010, 0.25),
+  mu_L = c(0.014, 1.54),
+  rho_P = c(0.0001, 0.5),
+  mu_P = c(0.015, 0.7),
+  mu_A = c(0.008, 0.1),
+  delta = c(0, 1),
+  gamma = c(0, 1)
+)
+
+# Number of LHS samples
+n_samples <- 1000
+
+# Generate LHS samples and scale to parameter ranges
+lhs_samples <- randomLHS(n_samples, length(param_ranges))
+param_samples <- as.data.frame(lhs_samples)
+names(param_samples) <- names(param_ranges)
+
+for (i in seq_along(param_ranges)) {
+  range <- param_ranges[[i]]
+  param_samples[[i]] <- qunif(param_samples[[i]], min = range[1], max = range[2])
+}
+
+# Initial state
+initial_state <- c(E = 10, L = 10, P = 10, A = 10, A_d = 10)
+
+# Time sequence
+times <- seq(0, 200, by = 1)
+
+# Run simulations
+run_simulation <- function(params) {
+  tryCatch({
+    result <- ode(y = initial_state, times = times, func = culex_model, parms = params, method = "lsoda")
+    return(as.data.frame(result))
+  }, error = function(e) {
+    return(NULL)
+  })
+}
+
+# Store output: mean adult abundance A
+output_data <- sapply(1:nrow(param_samples), function(i) {
+  params <- as.list(param_samples[i, ])
+  sim <- run_simulation(params)
+  if (!is.null(sim)) {
+    return(mean(sim$A, na.rm = TRUE))
+  } else {
+    return(NA)
+  }
+})
+
+# Clean up any failed runs
+valid_idx <- which(!is.na(output_data))
+output_data <- output_data[valid_idx]
+param_samples <- param_samples[valid_idx, ]
+
+# Convert output to data frame
+output_df <- data.frame(output = output_data)
+
+summary(output_df)
+
+# PRCC analysis
+prcc_results <- pcc(X = param_samples, y = output_df$output, rank = TRUE)
+
+# Print PRCC results
+print(prcc_results$PRCC)
+
+# Extract PRCC values and corresponding parameter names
+prcc_values <- prcc_results$PRCC
+parameters <- rownames(prcc_values)
+
+# Convert to a data frame for plotting
+prcc_df <- data.frame(Parameter = parameters, PRCC = prcc_values)
+prcc_df <- data.frame(Parameter = prcc_df$Parameter, PRCC = prcc_df$original)
+
+# Optional: Add absolute PRCC for sorting
+prcc_df <- prcc_df %>%
+  mutate(Abs_PRCC = abs(PRCC)) %>%
+  arrange(desc(Abs_PRCC))
+
+# Plot
+ggplot(prcc_df, aes(x = reorder(Parameter, Abs_PRCC), y = PRCC, fill = Abs_PRCC)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  coord_flip() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "PRCC Sensitivity Analysis",
+       x = "Parameters",
+       y = "PRCC Value",
+       fill = "|PRCC|") +
+  theme_minimal()
+```
+
+
+
+## Bootstraping the PRCC Calculation
+
+### Define a Bootstrap Function
+
+```{r}
+library(sensitivity)
+library(boot)
+
+prcc_bootstrap <- function(data, indices) {
+  # Resample data based on the given indices
+  data_boot <- data[indices, ]
+  
+  # Separate parameters (X) and output (y)
+  X <- data_boot[, -ncol(data)]
+  y <- data_boot[, ncol(data)]
+  
+  # Compute PRCC
+  prcc_result <- pcc(X = X, y = y, rank = TRUE)
+  
+  # Convert PRCC values to a numeric vector and remove names
+  prcc_values <- as.numeric(unlist(prcc_result$PRCC))
+  
+  return(prcc_values)
+}
+
+data_for_boot <- cbind(param_samples, Output = output_data)
+
+str(data_for_boot)
+
+# Prepare data and run Bootstrapping
+set.seed(123)  # For reproducibility
+bootstrap_results <- boot(
+  data = data_for_boot,
+  statistic = prcc_bootstrap,
+  R = 1000  # Number of bootstrap resamples
+)
+
+# Define the parameter names
+parameter_names <- c( "b",
+                      "K",
+                      "sigma_L", 
+                      "mu_A_d", 
+                      "phi_A", 
+                      "rho_E", 
+                      "mu_E", 
+                      "rho_L", 
+                      "mu_L", 
+                      "rho_P", 
+                      "mu_P",
+                      "mu_A",
+                      "delta",
+                      "gamma")
+
+
+# Assign column names to the bootstrap results to match the parameters
+colnames(bootstrap_results$t) <- parameter_names
+
+# Calculate mean PRCC values for each parameter
+prcc_means <- colMeans(bootstrap_results$t)
+
+# Calculate 95% confidence intervals for each parameter
+prcc_lower <- apply(bootstrap_results$t, 2, function(x) quantile(x, 0.025))
+prcc_upper <- apply(bootstrap_results$t, 2, function(x) quantile(x, 0.975))
+
+# Organize data for plotting
+prcc_summary <- data.frame(
+  Parameter = names(prcc_means),
+  PRCC_Mean = prcc_means,
+  CI_Lower = prcc_lower,
+  CI_Upper = prcc_upper
+)
+
+print(prcc_summary) 
+
+# Plot PRCC with Mean and Confidence Intervals
+
+# Sort the data frame by absolute PRCC_Mean values
+prcc_summary$Abs_PRCC_Mean <- abs(prcc_summary$PRCC_Mean)
+prcc_summary_sorted <- prcc_summary[order(prcc_summary$Abs_PRCC_Mean, decreasing = TRUE), ]
+
+# Plot PRCC with confidence intervals, sorted by absolute PRCC values
+plot_PRCC <- ggplot(prcc_summary_sorted, aes(x = reorder(Parameter, Abs_PRCC_Mean), y = PRCC_Mean)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.4, color = "darkblue") +
+  coord_flip() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed", linewidth = 0.5) +
+  labs(title = "PRCC with Mean and Confidence Intervals (Sorted by Abs Value)",
+       x = "Parameters",
+       y = "Mean PRCC with 95% CI") +
+  theme_bw() +
+  geom_text(aes(label = round(PRCC_Mean, 2)), vjust = 0.5, hjust = 1.8, color = "black", size = 4) +  # Move text labels slightly to the left
+  scale_y_continuous(breaks = seq(-1, 1, by = 0.2), limits = c(-1, 1))  # Set y-axis limits and ticks at every 0.2
+plot_PRCC
+
+# Another plot
+ggplot(prcc_summary_sorted, aes(x = reorder(Parameter, Abs_PRCC_Mean), y = PRCC_Mean)) +
+  geom_point(stat = "identity", fill = "skyblue") +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.5, color = "darkblue") +
+  coord_flip() +
+  geom_hline(yintercept = 0, color = "darkblue", linetype = "dashed", linewidth = 0.5) +
+  labs(title = "PRCC with Mean and Confidence Intervals",
+       x = "Parameters",
+       y = "Mean PRCC") +
+  theme_bw() +
+  scale_y_continuous(breaks = seq(-0.8, 0.8, by = 0.2), limits = c(-0.8, 0.8)) 
+
+```
+
+Modify the plot
+```{r}
+# Create a named list of expressions
+parameter_labels <- c(
+  b = expression(b),
+  K = expression(K),
+  sigma_L = expression(sigma[L]),
+  mu_A_d = expression(mu[A * d]),
+  phi_A = expression(phi[A]),
+  rho_E = expression(rho[E]),
+  mu_E = expression(mu[E]),
+  rho_L = expression(rho[L]),
+  mu_L = expression(mu[L]),
+  rho_P = expression(rho[P]),
+  mu_P = expression(mu[P]),
+  mu_A = expression(mu[A]),
+  delta = expression(delta),
+  gamma = expression(gamma)
+)
+
+plot_PRCC_final <- ggplot(prcc_summary_sorted, aes(x = reorder(Parameter, Abs_PRCC_Mean), y = PRCC_Mean, color = PRCC_Mean > 0)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.5) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(title = "PRCC with 95% Confidence Intervals",
+       x = "Model Parameters", 
+       y = "Mean PRCC") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "none") +
+  scale_y_continuous(
+    breaks = seq(-0.6, 0.8, by = 0.2),
+    limits = c(-0.6, 0.8),
+    labels = scales::label_number(accuracy = 0.01)) +
+  scale_x_discrete(labels = parameter_labels)
+plot_PRCC_final
+
+# Save plot as a pdf file
+#ggsave("PRCC_plot.pdf", plot_PRCC_final, width = 8, height = 6)
+
+```
+
+
+
+Combined code for the sensitivity analysis
+```{r}
+# Load packages
+pacman::p_load(deSolve, lhs, sensitivity, boot)
+
+# Define the ODEs
+culex_model <- function(time, state, parameters) {
+  with(as.list(c(state, parameters)), {
+    dE <- (b * phi_A * (1 - (A + A_d) / K) * A) - ((rho_E + mu_E) * E)
+    dL <- (rho_E * E) - ((rho_L + mu_L + sigma_L) * L)
+    dP <- (rho_L * L) - ((rho_P + mu_P) * P)
+    dA <- (rho_P * P + gamma * A_d) - ((mu_A + delta) * A)
+    dA_d <- (delta * A) - ((gamma + mu_A_d) * A_d)
+    
+    list(c(dE, dL, dP, dA, dA_d))
+  })
+}
+
+# Parameter ranges
+param_ranges <- list(
+  b = c(250, 350),
+  K = c(9e5, 1.1e8),
+  sigma_L = c(0.001, 0.01),
+  mu_A_d = c(0.001, 0.05),
+  phi_A = c(0.001, 0.55),
+  rho_E = c(0.001, 0.40),
+  mu_E = c(0.095, 1.025),
+  rho_L = c(0.010, 0.25),
+  mu_L = c(0.014, 1.54),
+  rho_P = c(0.0001, 0.5),
+  mu_P = c(0.015, 0.7),
+  mu_A = c(0.008, 0.1),
+  delta = c(0, 1),
+  gamma = c(0, 1)
+)
+
+# Number of LHS samples
+n_samples <- 1000
+
+# Generate LHS samples and scale to parameter ranges
+lhs_samples <- randomLHS(n_samples, length(param_ranges))
+param_samples <- as.data.frame(lhs_samples)
+names(param_samples) <- names(param_ranges)
+
+for (i in seq_along(param_ranges)) {
+  range <- param_ranges[[i]]
+  param_samples[[i]] <- qunif(param_samples[[i]], min = range[1], max = range[2])
+}
+
+# Initial state
+initial_state <- c(E = 10, L = 10, P = 10, A = 10, A_d = 10)
+
+# Time sequence
+times <- seq(0, 365, by = 1)
+
+# Run simulations
+run_simulation <- function(params) {
+  tryCatch({
+    result <- ode(y = initial_state, times = times, func = culex_model, parms = params, method = "lsoda")
+    return(as.data.frame(result))
+  }, error = function(e) {
+    return(NULL)
+  })
+}
+
+# Store output: mean adult abundance A
+output_data <- sapply(1:nrow(param_samples), function(i) {
+  params <- as.list(param_samples[i, ])
+  sim <- run_simulation(params)
+  if (!is.null(sim)) {
+    return(mean(sim$A, na.rm = TRUE))
+  } else {
+    return(NA)
+  }
+})
+
+# Clean up any failed runs
+valid_idx <- which(!is.na(output_data))
+output_data <- output_data[valid_idx]
+param_samples <- param_samples[valid_idx, ]
+
+# Convert output to data frame
+output_df <- data.frame(output = output_data)
+
+summary(output_df)
+
+# PRCC analysis
+prcc_results <- pcc(X = param_samples, y = output_df$output, rank = TRUE)
+
+# Print PRCC results
+print(prcc_results$PRCC)
+
+
+# Extract PRCC values and corresponding parameter names
+prcc_values <- prcc_results$PRCC
+parameters <- rownames(prcc_values)
+
+# Convert to a data frame for plotting
+prcc_df <- data.frame(Parameter = parameters, PRCC = prcc_values)
+prcc_df <- data.frame(Parameter = prcc_df$Parameter, PRCC = prcc_df$original)
+
+# Optional: Add absolute PRCC for sorting
+prcc_df <- prcc_df %>%
+  mutate(Abs_PRCC = abs(PRCC)) %>%
+  arrange(desc(Abs_PRCC))
+
+# Bootstrapping
+prcc_bootstrap <- function(data, indices) {
+  # Resample data based on the given indices
+  data_boot <- data[indices, ]
+  
+  # Separate parameters (X) and output (y)
+  X <- data_boot[, -ncol(data)]
+  y <- data_boot[, ncol(data)]
+  
+  # Compute PRCC
+  prcc_result <- pcc(X = X, y = y, rank = TRUE)
+  
+  # Convert PRCC values to a numeric vector and remove names
+  prcc_values <- as.numeric(unlist(prcc_result$PRCC))
+  
+  return(prcc_values)
+}
+
+data_for_boot <- cbind(param_samples, Output = output_data)
+
+str(data_for_boot)
+
+# Prepare data and run Bootstrapping
+set.seed(123)  # For reproducibility
+bootstrap_results <- boot(
+  data = data_for_boot,
+  statistic = prcc_bootstrap,
+  R = 1000  # Number of bootstrap resamples
+)
+
+# Define the parameter names
+parameter_names <- c( "b",
+                      "K",
+                      "sigma_L", 
+                      "mu_A_d", 
+                      "phi_A", 
+                      "rho_E", 
+                      "mu_E", 
+                      "rho_L", 
+                      "mu_L", 
+                      "rho_P", 
+                      "mu_P",
+                      "mu_A",
+                      "delta",
+                      "gamma")
+
+
+# Assign column names to the bootstrap results to match the parameters
+colnames(bootstrap_results$t) <- parameter_names
+
+# Calculate mean PRCC values for each parameter
+prcc_means <- colMeans(bootstrap_results$t)
+
+# Calculate 95% confidence intervals for each parameter
+prcc_lower <- apply(bootstrap_results$t, 2, function(x) quantile(x, 0.025))
+prcc_upper <- apply(bootstrap_results$t, 2, function(x) quantile(x, 0.975))
+
+# Organize data for plotting
+prcc_summary <- data.frame(
+  Parameter = names(prcc_means),
+  PRCC_Mean = prcc_means,
+  CI_Lower = prcc_lower,
+  CI_Upper = prcc_upper
+)
+
+print(prcc_summary) 
+
+# Plot PRCC with Mean and Confidence Intervals
+
+# Sort the data frame by absolute PRCC_Mean values
+prcc_summary$Abs_PRCC_Mean <- abs(prcc_summary$PRCC_Mean)
+prcc_summary_sorted <- prcc_summary[order(prcc_summary$Abs_PRCC_Mean, decreasing = TRUE), ]
+
+# plot
+ggplot(prcc_summary_sorted, aes(x = reorder(Parameter, Abs_PRCC_Mean), y = PRCC_Mean)) +
+  geom_point(stat = "identity", fill = "skyblue") +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.5, color = "darkblue") +
+  coord_flip() +
+  geom_hline(yintercept = 0, color = "darkblue", linetype = "dashed", linewidth = 0.5) +
+  labs(title = "PRCC with Mean and Confidence Intervals",
+       x = "Parameters",
+       y = "Mean PRCC") +
+  theme_bw() +
+  scale_y_continuous(breaks = seq(-0.8, 0.8, by = 0.2), limits = c(-0.8, 0.8)) 
+```
+The way I am looking at the sensitivity analysis is that, for each run, we have a specific value of the parameters. I am just giving a rang of possible parameter ranges we can have depending on the weather dependence and then using that to run the model in a deterministic way to see which of the params are more likely to influence the model more. Check again if this idea makes sense. (I think this idea treats the model as deterministic which is actually not true because the model as it is now functions as stochastic)
+
+
+
+
+This chunk will do as required and run the sensitivity analysis for only the constant parameters.
+
+```{r}
+# Load necessary packages
+pacman::p_load(dplyr, lubridate, deSolve, ggplot2, patchwork, lhs, sensitivity, parallel)
+
+# Load rainfall data
+rainfall_data <- read.csv("rainfall_data.csv")
+
+# Sample rainfall with preserved seasonality
+sample_rainfall_vector <- function(times, data) {
+  sapply(times, function(t) {
+    ref_date <- as.Date("2013-01-02") + t
+    current_month <- as.numeric(format(ref_date, "%m"))
+    monthly_data <- data %>% filter(Month == current_month) %>% pull(Total.Rain.mm)
+    sampled <- if (length(monthly_data) > 0) sample(monthly_data, 1, TRUE) else 0
+    return(ifelse(is.na(sampled), 0, sampled))
+  })
+}
+
+# Time sequence
+time <- seq(1, 365, by = 1)
+
+# Environmental variables
+sampled_rainfall <- sample_rainfall_vector(time, rainfall_data)
+temperature <- 6.049043 * (1 - 1.681684 * cos(2 * pi * (1.045027 * time + 684.023466) / 365))
+photoperiod <- 12.145428 * (1 + (-0.305279) * cos(2 * pi * (0.973365 * time + 14.455886) / 365))
+time_seq <- time  # global for model lookup
+
+# Culex model
+culex_model <- function(time, state, parameters) {
+  with(as.list(c(state, parameters)), {
+    index <- which.min(abs(time - time_seq))
+    temp <- temperature[index]; R <- sampled_rainfall[index]; photo <- photoperiod[index]
+
+    # Prevent negative values for mosquito stages
+    E <- pmax(E, 0); L <- pmax(L, 0); P <- pmax(P, 0); A <- pmax(A, 0); A_d <- pmax(A_d, 0)
+
+    # Life-history parameters (using temperature and rainfall)
+    phi_A <- (exp(-0.015 * (temp - 22)^2) * 2.2) * (exp(-0.05 * (R - 10)^2) / (1.2 + exp(-0.05 * (R - 10)^2)))
+    rho_E <- 0.5 * exp(-0.011 * (temp - 22)^2) * ((2.5 * exp(-0.05 * (R - 15)^2)) / (exp(-0.05 * (R - 15)^2) + 1.5))
+    rho_L <- 0.01 + (0.35 - 0.01) * (
+      (exp(-0.013 * (temp - 22)^2) * ((2.5 * exp(-0.05 * (R - 15)^2)) / (exp(-0.05 * (R - 15)^2) + 1.5))) /
+        (exp(0) * ((2.5 * exp(0)) / (exp(0) + 1.5)))
+    )
+    rho_P <- 0.5 * exp(-0.012 * (temp - 22)^2) * ((2.5 * exp(-0.05 * (R - 15)^2)) / (exp(-0.05 * (R - 15)^2) + 1.5))
+
+    mu_E <- 0.001 * (temp - 20)^2 + 0.15
+    mu_L <- 0.0025 * (temp - 20)^2 + 0.2
+    mu_P <- 0.001 * (temp - 20)^2 + 0.15
+    mu_A <- 0.0005714 * exp(0.1679139 * temp)
+
+    delta <- 1 / (1 + exp(-(-2.0285) * (photo - 14.5955)))
+    gamma <- 1 - delta
+
+    # Differential equations for mosquito stages
+    dE <- (b * phi_A * (1 - (A + A_d) / K) * A) - ((rho_E + mu_E) * E)
+    dL <- (rho_E * E) - ((rho_L + mu_L + sigma_L) * L)
+    dP <- (rho_L * L) - ((rho_P + mu_P) * P)
+    dA <- (rho_P * P + gamma * A_d) - ((mu_A + delta) * A)
+    dA_d <- (delta * A) - ((gamma + mu_A_d) * A_d)
+
+    return(list(c(dE, dL, dP, dA, dA_d)))
+  })
+}
+
+# Initial state
+initial_state <- c(E = 100, L = 10, P = 10, A = 10, A_d = 10)
+
+# Parameter ranges (ensure you scale appropriately)
+param_ranges <- data.frame(
+  b = c(250, 350),
+  K = c(9e5, 1.1e8),
+  sigma_L = c(0.001, 0.01),
+  mu_A_d = c(0.001, 0.05)
+)
+
+# Latin Hypercube Sampling
+set.seed(123)
+n_samples <- 1000
+lhs_sample <- randomLHS(n_samples, ncol(param_ranges))
+colnames(lhs_sample) <- names(param_ranges)
+
+# Scale parameters for LHS
+lhs_scaled <- data.frame(
+  sweep(lhs_sample, 2, unlist(param_ranges[1, ]), FUN = "*") +
+  sweep(1 - lhs_sample, 2, unlist(param_ranges[2, ]), FUN = "*")
+)
+
+# Run model for each parameter set using parallel processing
+run_model <- function(params) {
+  pars <- c(
+    b = as.numeric(params["b"]),
+    K = as.numeric(params["K"]),
+    sigma_L = as.numeric(params["sigma_L"]),
+    mu_A_d = as.numeric(params["mu_A_d"])
+  )
+  
+  out <- tryCatch({
+    ode(y = initial_state, times = time, func = culex_model, parms = pars, method = "lsoda")
+  }, error = function(e) return(NULL))
+  
+  if (is.null(out)) return(NA)  # Handle errors gracefully
+  df <- as.data.frame(out)
+  return(mean(df$A, na.rm = TRUE))
+}
+
+# Use multiple cores for parallel processing
+n_cores <- detectCores() - 1
+adult_means <- unlist(mclapply(seq_len(n_samples), function(i) run_model(lhs_scaled[i, ]), mc.cores = n_cores))
+
+# Filter out NA results
+valid_indices <- which(!is.na(adult_means))
+X <- lhs_scaled[valid_indices, ]
+Y <- adult_means[valid_indices]
+
+# PRCC with bootstrap CI
+prcc_result <- pcc(X, Y, rank = TRUE, nboot = 1000)
+
+# Prepare PRCC results for plotting
+prcc_df <- data.frame(
+  Parameter = rownames(prcc_result$PRCC),
+  PRCC = prcc_result$PRCC[,1],
+  Lower = prcc_result$PRCC[,4],
+  Upper = prcc_result$PRCC[,5]
+)
+
+
+# Create a named list of expressions
+parameter_labels <- c(
+  b = expression(b),
+  K = expression(K),
+  sigma_L = expression(sigma[L]),
+  mu_A_d = expression(mu[A * d])
+)
+
+# Plot PRCC with Mean and Confidence Intervals
+ggplot(prcc_df, aes(reorder(Parameter, PRCC), y = PRCC)) +
+  geom_point(stat = "identity", fill = "skyblue", size = 2) +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.5, color = "darkblue") +
+  coord_flip() +
+  geom_hline(yintercept = 0, color = "darkblue", linetype = "dashed", linewidth = 0.5) +
+  labs(x = "Parameters",
+       y = "PRCC values") +
+  theme_bw() +
+  scale_y_continuous(
+    breaks = seq(-1, 1, by = 0.2), 
+    limits = c(-1, 1),
+    labels = scales::label_number(accuracy = 0.01)) +
+  scale_x_discrete(labels = parameter_labels)
+
+
+ggplot(prcc_df, aes(reorder(Parameter, PRCC), y = PRCC)) +
+  geom_point(stat = "identity", fill = "skyblue", size = 2) +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.35, color = "darkblue") +
+  coord_flip() +
+  geom_hline(yintercept = 0, color = "darkblue", linetype = "dashed", linewidth = 0.5) +
+  labs(x = "Parameters",
+       y = "PRCC values") +
+  theme_bw() +
+  scale_y_continuous(
+    breaks = seq(-1, 1, by = 0.2), 
+    limits = c(-1, 1),
+    labels = scales::label_number(accuracy = 0.01)) +
+  scale_x_discrete(labels = parameter_labels) +
+  theme(
+    axis.text = element_text(size = 14),  # Increase axis tick font size
+    axis.title = element_text(size = 16, face = "bold"),  # Make axis labels bold and increase font size
+    axis.text.x = element_text(size = 12),  # Increase font size of x-axis tick labels (optional)
+    axis.text.y = element_text(size = 14)   # Increase font size of y-axis tick labels (optional)
+  )
+
+# Save the plot
+#ggsave("prcc_plot.pdf", width = 8, height = 6, dpi = 300)
+
+```
+
+
+Key Updates:
+Multiple Simulations: The function run_model_multiple_rainfall runs the model multiple times (n_simulations) with different rainfall sequences and calculates the mean adult abundance for each parameter set.
+
+Parallelization: The parallelization using mclapply allows you to efficiently run the model with different parameters in parallel across multiple cores, improving the speed of the simulations.
+
+Robustness: By averaging the results across multiple rainfall samples for each parameter set, this approach accounts for the stochastic nature of rainfall and improves the robustness of your sensitivity analysis.
+
