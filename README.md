@@ -38,3 +38,7 @@ To reproduce the full sensitivity analysis:
 
 ```r
 rmarkdown::render("code/sensitivity_analysis_summary.Rmd")
+```
+
+## 📊 Example Output
+![PRCC Plot](figures/PRCC_plot.png)
