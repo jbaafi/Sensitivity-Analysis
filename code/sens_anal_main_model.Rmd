@@ -1,0 +1,267 @@
+---
+title: "Sensitivity Analysis"
+author: "jbaafi"
+date: "2024-11-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Define the system for sensitivity analysis
+
+Here we include parameter ranges that reflect the weather-dependent parameter values.
+We consider T \in[15, 34]\degrees C and R \in [10, 100] mm.
+
+```{r}
+library(lhs)
+library(sensitivity)
+library(deSolve)
+library(boot)
+
+# Define the mosquito model as a function
+mosquito_model <- function(time, state, parameters) {
+  with(as.list(c(state, parameters)), {
+    dE <- b * phi_Ao * (1 - (Ao / K)) * Ao - (rho_E + mu_E) * E
+    dL <- rho_E * E - (rho_L + mu_L + delta_L * L) * L
+    dP <- rho_L * L - (rho_P + mu_P) * P
+    dAh <- rho_P * P + phi_Ao * Ao - (rho_Ah + mu_A + mu_Ah) * Ah
+    dAr <- rho_Ah * Ah - (rho_Ar + mu_A) * Ar
+    dAo <- rho_Ar * Ar - (phi_Ao + mu_A + mu_Ao) * Ao
+
+    list(c(dE, dL, dP, dAh, dAr, dAo))
+  })
+}
+
+# Define parameter ranges
+param_ranges <- list(
+  b = c(150, 300), phi_Ao = c(0.03, 0.45), 
+  K = c(500, 3*10^6), rho_E = c(0.17, 0.5), 
+  mu_E = c(0.06, 0.24), rho_L = c(0.05, 0.1), 
+  mu_L = c(0.025, 0.1), delta_L = c(0.02, 0.06), 
+  rho_P = c(0.14, 0.33), mu_P = c(0.05, 0.24), 
+  rho_Ah = c(0.6, 2.3), mu_A = c(0.075, 0.13), 
+  mu_Ah = c(0.01, 0.02), rho_Ar = c(0.5, 1.5), 
+  mu_Ao = c(0.01, 0.02)
+)
+
+# Set up Latin Hypercube Sampling
+n_samples <- 1000  # This can be adjusted
+lhs_samples <- randomLHS(n_samples, length(param_ranges)) # create a vector of random samples for each parameter
+
+# Transform samples to parameter ranges
+params <- as.data.frame(lhs_samples)
+for (i in 1:length(param_ranges)) {
+  params[[i]] <- params[[i]] * diff(param_ranges[[i]]) + param_ranges[[i]][1]
+}
+names(params) <- names(param_ranges)
+
+# Run model for each parameter set
+time <- seq(0, 100, by = 1)  # Time range
+initial_state <- c(E = 10, L = 10, P = 10, Ah = 10, Ar = 10, Ao = 10)  # Initial conditions
+
+# Define a function that takes in parameter set as input and pass it to the ode solver. param_set corresponds to a single row of params dataframe
+simulate_model <- function(param_set) {
+  output <- ode(y = initial_state, times = time, func = mosquito_model, parms = param_set) # Solve system of ODEs
+  A_sum <- rowSums(output[, c("Ah", "Ar", "Ao")])  # Sum of adult stages
+  mean(A_sum)  # Output metric as mean of sum across time
+} 
+
+# Apply the model to all samples (for each parameter set)
+output_results <- apply(params, 1, function(p) simulate_model(as.list(p)))
+
+# Conduct PRCC analysis with bootstrapping
+prcc_results <- pcc(X = params, y = output_results, nboot = 500, rank = TRUE)
+
+```
+
+Plot PRCC 
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Extract PRCC results and confidence intervals
+prcc_df <- data.frame(
+  Parameter = rownames(prcc_results$PRCC),
+  PRCC = prcc_results$PRCC[, "original"],
+  Lower_CI = prcc_results$PRCC[, "min. c.i."],
+  Upper_CI = prcc_results$PRCC[, "max. c.i."]
+)
+
+# We sort by absolute PRCC value for better visualization
+prcc_df <- prcc_df %>% arrange(desc(abs(PRCC)))
+
+# Create PRCC plot with ggplot2
+prcc_plot <- ggplot(prcc_df, aes(x = reorder(Parameter, abs(PRCC)), y = PRCC)) +
+  geom_point(color = "blue") +
+  geom_errorbar(aes(ymin = Lower_CI, ymax = Upper_CI), width = 0.2, color = "darkgray") +
+  coord_flip() +
+  labs(
+    x = "Parameter",
+    y = "Partial Rank Correlation Coefficient (PRCC)",
+    title = "PRCC of Parameters on Adult Mosquito Population"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# Print plot
+print(prcc_plot)
+
+```
+
+To-do
+1. Make the figure more appealing 
+2. Save it and include it in the manuscript
+3. Add a section to the manuscript on sensitivity analysis.
+
+
+```{r}
+# Plot PRCC with confidence intervals, sorted by absolute PRCC values
+ggplot(prcc_df, aes(x = reorder(Parameter, abs(PRCC)), y = PRCC)) +
+  geom_point(stat = "identity", fill = "skyblue") +
+  geom_errorbar(aes(ymin = Lower_CI, ymax = Upper_CI), width = 0.5, color = "darkgray") +
+  coord_flip() +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed", linewidth = 0.5) +
+  labs(title = "PRCC of Parameters on Adult Mosquito Population ",
+       x = "Parameters",
+       y = "PRCC values") +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")) +
+  #geom_text(aes(label = round(PRCC, 2)), vjust = 0.5, hjust = 2.0, color = "black", size = 4) +  # Move text labels slightly to the left
+  scale_y_continuous(breaks = seq(-1, 1, by = 0.2), limits = c(-1, 1))  # Set y-axis limits and ticks at every 0.2
+
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Create a mapping of parameter names to their symbols
+param_labels <- c(
+  b = expression(b),
+  phi_Ao = expression(phi[Ao]),
+  K = expression(K),
+  rho_E = expression(rho[E]),
+  mu_E = expression(mu[E]),
+  rho_L = expression(rho[L]),
+  mu_L = expression(mu[L]),
+  delta_L = expression(delta[L]),
+  rho_P = expression(rho[P]),
+  mu_P = expression(mu[P]),
+  rho_Ah = expression(rho[Ah]),
+  mu_A = expression(mu[A]),
+  mu_Ah = expression(mu[Ah]),
+  rho_Ar = expression(rho[Ar]),
+  mu_Ar = expression(mu[Ar]),
+  mu_Ao = expression(mu[Ao])
+)
+
+# Sort PRCC results by absolute value
+prcc_df <- prcc_df %>% arrange(desc(abs(PRCC)))
+
+# Create PRCC plot with parameter symbols on the y-axis
+ggplot(prcc_df, aes(x = reorder(Parameter, abs(PRCC)), y = PRCC)) +
+  geom_point(stat = "identity", fill = "skyblue", size = 1.5) +
+  geom_errorbar(aes(ymin = Lower_CI, ymax = Upper_CI), width = 0.5, color = "darkgray") +
+  coord_flip() +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed", linewidth = 0.5) +
+  labs(
+    title = "",
+    x = "Parameters",
+    y = "PRCC Values"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold"),
+    axis.text.y = element_text(size = 15),  # Adjust y-axis label size for clarity
+    axis.text.x = element_text(size = 13)
+  ) +
+  scale_x_discrete(labels = param_labels) +  # Use symbols for the y-axis labels
+  scale_y_continuous(breaks = seq(-0.8, 1, by = 0.2), limits = c(-0.8, 1))  # Set y-axis limits and ticks
+
+# Save the plot to a file
+ggsave(
+  filename = "PRCC_Plot.png",  # Save as PNG file
+  plot = prcc_plot,
+  width = 8,                  # Width of the plot in inches
+  height = 6,                 # Height of the plot in inches
+  dpi = 300                   # High resolution for publication
+)
+
+# Print the plot to the RStudio viewer
+print(prcc_plot)
+```
+
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+
+# Ensure the PRCC DataFrame is sorted by absolute PRCC values
+prcc_df <- prcc_df %>% arrange(desc(abs(PRCC)))
+
+# Create PRCC plot with parameter symbols on the y-axis
+prcc_plot <- ggplot(prcc_df, aes(x = reorder(Parameter, abs(PRCC)), y = PRCC)) +
+  geom_point(stat = "identity", fill = "skyblue", size = 1.5) +
+  geom_errorbar(aes(ymin = Lower_CI, ymax = Upper_CI), width = 0.75) +
+  coord_flip() +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed", linewidth = 0.5) +
+  labs(
+    title = "",
+    x = "Parameters",
+    y = "PRCC Values"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold"),
+    axis.text.y = element_text(size = 15),  # Adjust y-axis label size for clarity
+    axis.text.x = element_text(size = 12)
+  ) +
+  scale_x_discrete(labels = param_labels) +  # Use symbols for the y-axis labels
+  scale_y_continuous(breaks = seq(-0.8, 1, by = 0.2), limits = c(-0.8, 1))  # Set y-axis limits and ticks
+
+# Save the plot to a file
+ggsave(
+  filename = "PRCC_Plot.png",  # Save as PNG file
+  plot = prcc_plot,
+  width = 8,                  # Width of the plot in inches
+  height = 6,                 # Height of the plot in inches
+  dpi = 300                   # High resolution for publication
+)
+
+# Print the plot to the RStudio viewer
+print(prcc_plot)
+
+```
+
+
+
+```{r}
+# Plot PRCC with confidence intervals, sorted by absolute PRCC values
+ggplot(prcc_df, aes(x = reorder(Parameter, abs(PRCC)), y = PRCC)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_errorbar(aes(ymin = Lower_CI, ymax = Upper_CI), width = 0.5, color = "darkgray") +
+  coord_flip() +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed", linewidth = 0.5) +
+  labs(title = "PRCC with Mean and Confidence Intervals (Sorted by Abs Value)",
+       x = "Parameters",
+       y = "Mean PRCC with 95% CI") +
+  theme_bw() +
+  geom_text(aes(label = round(PRCC, 2)), vjust = 0.5, hjust = 2.0, color = "black", size = 4) +  # Move text labels slightly to the left
+  scale_y_continuous(breaks = seq(-1, 1, by = 0.2), limits = c(-1, 1))  # Set y-axis limits and ticks at every 0.2
+
+```
+
