@@ -41,4 +41,4 @@ rmarkdown::render("code/sensitivity_analysis_summary.Rmd")
 ```
 
 ## 📊 Example Output
-![PRCC Plot](figures/prcc_plot.png)
+![PRCC Plot](figures/PRCC_plot.png)
